@@ -1,4 +1,4 @@
-# π RuView
+# SIREN — RuView (SIREN-Ruview)
 
 <p align="center">
   <a href="https://cognitum.one/seed">
@@ -11,12 +11,17 @@
   </a>
 </p>
 
-> **Beta Software** — Under active development. APIs and firmware may change. Known limitations:
+> **Beta Software — Personal Fork** — Under active development. This is a personal
+> fork of RuView maintained by GitHub user `tri01012002`. APIs and firmware may change.
+> Known limitations:
 > - ESP32-C3 and original ESP32 are not supported (single-core, insufficient for CSI DSP)
 > - Single ESP32 deployments have limited spatial resolution — use 2+ nodes or add a [Cognitum Seed](https://cognitum.one) for best results
 > - Camera-free pose accuracy is limited (PCK@20 ≈ 2.5% with proxy labels) — [camera ground-truth training](docs/adr/ADR-079-camera-ground-truth-training.md) targets **35%+ PCK@20**; the pipeline is implemented, but the data-collection and evaluation phases (ADR-079 P7–P9) are still pending, so no measured camera-supervised PCK@20 has been published yet
 >
-> Contributions and bug reports welcome at [Issues](https://github.com/ruvnet/RuView/issues).
+> Contributions and bug reports welcome at the original project: [ruvnet/RuView](https://github.com/ruvnet/RuView/issues).
+
+Maintainer: tri01012002 — https://github.com/tri01012002/SIREN-Ruview
+
 
 ## **See through walls with WiFi** ##
 
