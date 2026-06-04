@@ -1,14 +1,10 @@
 # SIREN — RuView (SIREN-Ruview)
 
 <p align="center">
-  <a href="https://cognitum.one/seed">
-    <img src="assets/ruview-seed.png" alt="RuView - WiFi DensePose" width="100%">
-  </a>
+  <img src="assets/ruview-seed.png" alt="RuView - WiFi DensePose" width="100%">
 </p>
 <p align="center">
-  <a href="https://cognitum.one/seed">
-    <img src="assets/seed.png" alt="Cognitum Seed" width="100%">
-  </a>
+  <img src="assets/seed.png" alt="Project logo" width="100%">
 </p>
 
 > **Beta Software — Personal Fork** — Under active development. This is a personal
@@ -38,7 +34,7 @@ Every WiFi router already fills your space with radio waves. When people move, b
 - **Environment mapping** — RF fingerprinting identifies rooms, detects moved furniture, spots new objects
 - **Sleep quality** — overnight monitoring with sleep stage classification and apnea screening
 
-Built on [RuVector](https://github.com/ruvnet/ruvector/) and [Cognitum Seed](https://cognitum.one), RuView runs entirely on edge hardware — an ESP32 mesh (as low as $9 per node) paired with a Cognitum Seed for persistent memory, cryptographic attestation, and AI integration. No cloud, no cameras, no internet required.
+Built on [RuVector](https://github.com/ruvnet/ruvector/), this personal fork is actively integrating a custom AI model developed by the maintainer to make the system a production-capable, runnable project instead of a demo. RuView runs on edge hardware — an ESP32 mesh (as low as $9 per node). An optional appliance can provide persistent storage, kNN services, and cryptographic attestation when available. No cloud, no cameras, no internet required.
 
 The system learns each environment locally using spiking neural networks that adapt in under 30 seconds, with multi-frequency mesh scanning across 6 WiFi channels that uses your neighbors' routers as free radar illuminators. Every measurement is cryptographically attested via an Ed25519 witness chain.
 
@@ -75,7 +71,7 @@ RuView turns ordinary WiFi into a contactless sensor. A $9 ESP32 board reads the
 > | 📡 **Multi-frequency mesh** | Channel hopping across 6 bands, TDM slot scheduling ([ADR-029](docs/adr/ADR-029-multifrequency-mesh.md)) | 3× sensing bandwidth |
 > | 🌐 **3D point cloud fusion** | Camera depth (MiDaS) + WiFi CSI + mmWave radar → unified spatial model | 22 ms pipeline · 19K+ points/frame |
 >
-> Browse the full 105-module catalog (with practical descriptions, sizes, and difficulty) below in [🧩 Edge Module Catalog](#-edge-module-catalog), or visit [seed.cognitum.one/store](https://seed.cognitum.one/store).
+> Browse the full 105-module catalog (with practical descriptions, sizes, and difficulty) below in [🧩 Edge Module Catalog](#-edge-module-catalog). The maintainer is actively developing an AI model and integration path to make these modules usable in production deployments.
 >
 > 🤗 **Pretrained weights**: download from [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained) — see [Loading the pretrained model](#loading-the-pretrained-model) below for one-command setup.
 
