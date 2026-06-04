@@ -1,11 +1,6 @@
 # SIREN — RuView (SIREN-Ruview)
 
-<p align="center">
-  <img src="assets/ruview-seed.png" alt="RuView - WiFi DensePose" width="100%">
-</p>
-<p align="center">
-  <img src="assets/seed.png" alt="Project logo" width="100%">
-</p>
+
 
 > **Beta Software — Personal Fork** — Under active development. This is a personal
 > fork of RuView maintained by GitHub user `tri01012002`. APIs and firmware may change.
