@@ -243,8 +243,15 @@ export class HudController {
     dsSel.addEventListener('change', (e) => {
       s.dataSource = e.target.value;
       document.getElementById('ws-url-row').style.display = e.target.value === 'ws' ? 'flex' : 'none';
-      if (e.target.value === 'ws' && s.wsUrl) obs._connectWS(s.wsUrl);
-      else obs._disconnectWS();
+      // Get the current URL from input field (may have been typed but not yet saved to s.wsUrl)
+      const wsInput = document.getElementById('opt-ws-url');
+      const currentUrl = wsInput ? wsInput.value.trim() : s.wsUrl;
+      if (e.target.value === 'ws' && currentUrl) {
+        s.wsUrl = currentUrl;
+        obs._connectWS(currentUrl);
+      } else {
+        obs._disconnectWS();
+      }
       this.updateSourceBadge(s.dataSource, obs._ws);
       this.saveSettings();
     });
@@ -252,9 +259,18 @@ export class HudController {
 
     const wsInput = document.getElementById('opt-ws-url');
     wsInput.value = s.wsUrl;
-    wsInput.addEventListener('change', (e) => {
-      s.wsUrl = e.target.value;
-      if (s.dataSource === 'ws') obs._connectWS(e.target.value);
+    // Use 'input' event instead of 'change' to update immediately while typing
+    wsInput.addEventListener('input', (e) => {
+      s.wsUrl = e.target.value.trim();
+      // If already in WS mode and URL is valid, reconnect immediately
+      if (s.dataSource === 'ws' && s.wsUrl) {
+        obs._connectWS(s.wsUrl);
+      }
+      this.saveSettings();
+    });
+    // Also listen to blur to ensure any pending change is saved
+    wsInput.addEventListener('blur', (e) => {
+      s.wsUrl = e.target.value.trim();
       this.saveSettings();
     });
 
