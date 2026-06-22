@@ -8,7 +8,7 @@ Output: JSONL file in data/ground-truth/ with per-frame 17-keypoint COCO poses.
 
 Usage:
     python scripts/collect-ground-truth.py --preview --duration 60
-    python scripts/collect-ground-truth.py --server http://192.168.1.10:3000
+    python scripts/collect-ground-truth.py --server http://192.168.1.10:8080
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ def main():
     )
     parser.add_argument(
         "--server",
-        default="http://localhost:3000",
-        help="Sensing server URL (default: http://localhost:3000)",
+        default="http://localhost:8080",
+        help="Sensing server URL (default: http://localhost:8080)",
     )
     parser.add_argument(
         "--preview",
@@ -213,7 +213,15 @@ def main():
     # --- Start CSI recording ---
     recording_url_start = f"{args.server}/api/v1/recording/start"
     recording_url_stop = f"{args.server}/api/v1/recording/stop"
-    csi_started = post_json(recording_url_start)
+    
+    payload = {
+        "session_name": f"groundtruth-{timestamp_str}",
+        "label": "camera-gt",
+        "duration_secs": args.duration
+    }
+
+    csi_started = post_json(recording_url_start, payload)
+    
     if csi_started:
         print("CSI recording started on sensing server.")
     else:

@@ -6,9 +6,11 @@ All mock/synthetic data generation is isolated in src.testing and is only
 invoked when settings.mock_pose_data is explicitly True.
 """
 
+import importlib.util
 import logging
 import asyncio
-from typing import Dict, List, Optional, Any
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -18,8 +20,6 @@ from src.config.settings import Settings
 from src.config.domains import DomainConfig
 from src.core.csi_processor import CSIProcessor
 from src.core.phase_sanitizer import PhaseSanitizer
-from src.models.densepose_head import DensePoseHead
-from src.models.modality_translation import ModalityTranslationNetwork
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +27,19 @@ logger = logging.getLogger(__name__)
 class PoseService:
     """Service for pose estimation operations."""
     
-    def __init__(self, settings: Settings, domain_config: DomainConfig):
+    def __init__(self, settings: Settings, domain_config: DomainConfig, hardware_service: Optional[Any] = None):
         """Initialize pose service."""
         self.settings = settings
         self.domain_config = domain_config
+        self.hardware_service = hardware_service
         self.logger = logging.getLogger(__name__)
         
         # Initialize components
         self.csi_processor = None
         self.phase_sanitizer = None
-        self.densepose_model = None
-        self.modality_translator = None
-        
+        self.pose_model = None
+        self.model_persons = min(3, max(1, getattr(self.settings, 'pose_max_persons', 3)))
+
         # Service state
         self.is_initialized = False
         self.is_running = False
@@ -107,33 +108,38 @@ class PoseService:
     async def _initialize_models(self):
         """Initialize neural network models."""
         try:
-            # Initialize DensePose model
-            if self.settings.pose_model_path:
-                self.densepose_model = DensePoseHead()
-                # Load model weights if path is provided
-                # model_state = torch.load(self.settings.pose_model_path)
-                # self.densepose_model.load_state_dict(model_state)
-                self.logger.info("DensePose model loaded")
-            else:
-                self.logger.warning("No pose model path provided, using default model")
-                self.densepose_model = DensePoseHead()
-            
-            # Initialize modality translation
-            config = {
-                'input_channels': 64,  # CSI data channels
-                'hidden_channels': [128, 256, 512],
-                'output_channels': 256,  # Visual feature channels
-                'use_attention': True
-            }
-            self.modality_translator = ModalityTranslationNetwork(config)
-            
-            # Set models to evaluation mode
-            self.densepose_model.eval()
-            self.modality_translator.eval()
-            
+            self.pose_model = self._load_hybrid_pose_model()
+            self.pose_model.eval()
+            self.logger.info("Hybrid CSI pose model loaded")
         except Exception as e:
             self.logger.error(f"Failed to initialize models: {e}")
             raise
+
+    def _load_hybrid_pose_model(self) -> torch.nn.Module:
+        """Dynamically import and instantiate HybridCSIModel from scripts/retrain_model.py."""
+        script_path = Path(__file__).resolve().parents[4] / "scripts" / "retrain_model.py"
+        if not script_path.exists():
+            raise FileNotFoundError(f"Hybrid model loader not found: {script_path}")
+
+        spec = importlib.util.spec_from_file_location("retrain_model", str(script_path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load hybrid model module from {script_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        model_cls = getattr(module, "HybridCSIModel", None)
+        if model_cls is None:
+            raise ImportError("HybridCSIModel not found in retrain_model.py")
+
+        model = model_cls(num_persons=self.model_persons, pretrained_path=None)
+
+        if self.settings.pose_model_path:
+            checkpoint = torch.load(self.settings.pose_model_path, map_location="cpu")
+            state = checkpoint.get("model_state_dict", checkpoint)
+            model.load_state_dict(state, strict=False)
+
+        return model
     
     async def start(self):
         """Start the pose service."""
@@ -180,147 +186,195 @@ class PoseService:
             self.logger.error(f"Error processing CSI data: {e}")
             raise
     
-    async def _process_csi(self, csi_data: np.ndarray, metadata: Dict[str, Any]) -> np.ndarray:
-        """Process raw CSI data."""
-        # Convert raw data to CSIData format
+    async def _process_csi(self, csi_data: Union[np.ndarray, Any], metadata: Dict[str, Any]) -> np.ndarray:
+        """Process raw CSI data into a 168-dim CSI inference vector."""
         from src.hardware.csi_extractor import CSIData
-        
-        # Create CSIData object with proper fields
-        # For mock data, create amplitude and phase from input
-        if csi_data.ndim == 1:
-            amplitude = np.abs(csi_data)
-            phase = np.angle(csi_data) if np.iscomplexobj(csi_data) else np.zeros_like(csi_data)
+
+        # Accept CSIData objects directly when they come from hardware collectors.
+        if hasattr(csi_data, "amplitude"):
+            csi_data_obj = csi_data
         else:
-            amplitude = csi_data
-            phase = np.zeros_like(csi_data)
-        
-        csi_data_obj = CSIData(
-            timestamp=metadata.get("timestamp", datetime.now()),
-            amplitude=amplitude,
-            phase=phase,
-            frequency=metadata.get("frequency", 5.0),  # 5 GHz default
-            bandwidth=metadata.get("bandwidth", 20.0),  # 20 MHz default
-            num_subcarriers=metadata.get("num_subcarriers", 56),
-            num_antennas=metadata.get("num_antennas", 3),
-            snr=metadata.get("snr", 20.0),  # 20 dB default
-            metadata=metadata
-        )
-        
-        # Process CSI data
+            # If raw array is passed, construct a CSIData object for the processor.
+            if isinstance(csi_data, np.ndarray):
+                if csi_data.ndim == 2 and csi_data.shape[1] == 56:
+                    amplitude = csi_data
+                elif csi_data.ndim == 1 and csi_data.shape[0] == 56:
+                    amplitude = np.tile(csi_data, 3)
+                else:
+                    amplitude = np.asarray(csi_data, dtype=np.float32)
+                    if amplitude.ndim == 1 and amplitude.shape[0] == 168:
+                        amplitude = amplitude.reshape(3, 56)
+                    else:
+                        amplitude = amplitude.flatten()
+                        if amplitude.size == 56:
+                            amplitude = np.tile(amplitude, 3)
+                        elif amplitude.size == 168:
+                            amplitude = amplitude.reshape(3, 56)
+                        else:
+                            amplitude = np.resize(amplitude, (3, 56))
+            else:
+                amplitude = np.asarray(csi_data, dtype=np.float32)
+
+            phase = np.zeros_like(amplitude)
+            csi_data_obj = CSIData(
+                timestamp=metadata.get("timestamp", datetime.now()),
+                amplitude=amplitude,
+                phase=phase,
+                frequency=metadata.get("frequency", 5.0),
+                bandwidth=metadata.get("bandwidth", 20.0),
+                num_subcarriers=56,
+                num_antennas=3,
+                snr=metadata.get("snr", 20.0),
+                metadata=metadata
+            )
+
+        # Process CSI data through the existing pipeline for history and detection features.
         try:
             detection_result = await self.csi_processor.process_csi_data(csi_data_obj)
-            
-            # Add to history for temporal analysis
             self.csi_processor.add_to_history(csi_data_obj)
-            
-            # Extract amplitude data for pose estimation
-            if detection_result and detection_result.features:
-                amplitude_data = detection_result.features.amplitude_mean
-                
-                # Apply phase sanitization if we have phase data
-                if hasattr(detection_result.features, 'phase_difference'):
-                    phase_data = detection_result.features.phase_difference
-                    # PhaseSanitizer's full-pipeline method is sanitize_phase,
-                    # not sanitize (issue #612). The shorter name was an
-                    # AttributeError waiting to fire on any code path that
-                    # reaches this branch.
-                    sanitized_phase = self.phase_sanitizer.sanitize_phase(phase_data)
-                    # Combine amplitude and phase data
-                    return np.concatenate([amplitude_data, sanitized_phase])
-                
-                return amplitude_data
-            
         except Exception as e:
-            self.logger.warning(f"CSI processing failed, using raw data: {e}")
-        
-        return csi_data
+            self.logger.warning(f"CSI processing failed, using raw data for model inference: {e}")
+
+        amplitude = csi_data_obj.amplitude
+        if amplitude.ndim == 2:
+            amplitude = amplitude.reshape(-1)
+        elif amplitude.ndim > 2:
+            amplitude = amplitude.flatten()
+
+        if amplitude.shape[0] == 56:
+            amplitude = np.tile(amplitude, 3)
+        elif amplitude.shape[0] > 168:
+            amplitude = amplitude[:168]
+        elif amplitude.shape[0] < 168:
+            padded = np.zeros(168, dtype=np.float32)
+            padded[: amplitude.shape[0]] = amplitude
+            amplitude = padded
+
+        return amplitude.astype(np.float32)
     
     async def _estimate_poses(self, csi_data: np.ndarray, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Estimate poses from processed CSI data."""
         if self.settings.mock_pose_data:
             return self._generate_mock_poses()
-        
+
         try:
             # Convert CSI data to tensor
             csi_tensor = torch.from_numpy(csi_data).float()
-            
-            # Add batch dimension if needed
-            if len(csi_tensor.shape) == 2:
+            if csi_tensor.dim() == 1:
                 csi_tensor = csi_tensor.unsqueeze(0)
-            
-            # Translate modality (CSI to visual-like features)
+
+            csi_tensor = self._normalize_csi_tensor(csi_tensor)
+
             with torch.no_grad():
-                visual_features = self.modality_translator(csi_tensor)
-                
-                # Estimate poses using DensePose
-                pose_outputs = self.densepose_model(visual_features)
-            
-            # Convert outputs to pose detections
-            poses = self._parse_pose_outputs(pose_outputs)
-            
-            # Filter by confidence threshold
+                keypoint_outputs, activity_outputs = self.pose_model(csi_tensor)
+
+            poses = self._parse_pose_outputs(keypoint_outputs, activity_outputs)
+
             filtered_poses = [
-                pose for pose in poses 
+                pose for pose in poses
                 if pose.get("confidence", 0.0) >= self.settings.pose_confidence_threshold
             ]
-            
-            # Limit number of persons
+
             if len(filtered_poses) > self.settings.pose_max_persons:
                 filtered_poses = sorted(
-                    filtered_poses, 
-                    key=lambda x: x.get("confidence", 0.0), 
+                    filtered_poses,
+                    key=lambda x: x.get("confidence", 0.0),
                     reverse=True
                 )[:self.settings.pose_max_persons]
-            
+
             return filtered_poses
-            
+
         except Exception as e:
             self.logger.error(f"Error in pose estimation: {e}")
             return []
+
+    def _normalize_csi_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Ensure the CSI tensor has a length of 168 features."""
+        if tensor.shape[1] == 56:
+            tensor = tensor.repeat(1, 3)
+        elif tensor.shape[1] < 168:
+            pad = tensor.new_zeros((tensor.shape[0], 168 - tensor.shape[1]))
+            tensor = torch.cat([tensor, pad], dim=1)
+        elif tensor.shape[1] > 168:
+            tensor = tensor[:, :168]
+        return tensor
     
-    def _parse_pose_outputs(self, outputs: torch.Tensor) -> List[Dict[str, Any]]:
-        """Parse neural network outputs into pose detections.
+    def _parse_pose_outputs(self, keypoint_outputs: torch.Tensor, activity_outputs: torch.Tensor) -> List[Dict[str, Any]]:
+        """Parse hybrid model outputs into person pose detections."""
+        poses: List[Dict[str, Any]] = []
+        kp_array = keypoint_outputs.detach().cpu().numpy()
+        if activity_outputs is not None:
+            activity_probs = torch.softmax(activity_outputs, dim=-1).detach().cpu().numpy()
+        else:
+            activity_probs = None
 
-        Extracts confidence, keypoints, bounding boxes, and activity from model
-        output tensors. The exact interpretation depends on the model architecture;
-        this implementation assumes the DensePoseHead output format.
+        for batch_index in range(kp_array.shape[0]):
+            person_tensor = kp_array[batch_index]
+            activity_score = float(activity_probs[batch_index].max()) if activity_probs is not None else 0.0
+            activity_index = int(activity_probs[batch_index].argmax()) if activity_probs is not None else 0
+            activity_label = self._activity_label(activity_index)
 
-        Args:
-            outputs: Model output tensor of shape (batch, features).
+            for person_index in range(self.model_persons):
+                start = person_index * 34
+                chunk = person_tensor[start:start + 34]
+                energy = float(np.abs(chunk).sum())
+                if energy < 1e-3:
+                    continue
 
-        Returns:
-            List of pose detection dictionaries.
-        """
-        poses = []
-        batch_size = outputs.shape[0]
+                keypoints = []
+                xs = []
+                ys = []
+                for joint_index, name in enumerate([
+                    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                    "left_wrist", "right_wrist", "left_hip", "right_hip",
+                    "left_knee", "right_knee", "left_ankle", "right_ankle",
+                ]):
+                    x = float(np.clip(chunk[joint_index * 2], 0.0, 1.0))
+                    y = float(np.clip(chunk[joint_index * 2 + 1], 0.0, 1.0))
+                    kp_confidence = float(min(1.0, max(0.0, activity_score * 0.9 + 0.1)))
+                    keypoints.append({
+                        "name": name,
+                        "x": x,
+                        "y": y,
+                        "z": 0.0,
+                        "confidence": kp_confidence,
+                    })
+                    xs.append(x)
+                    ys.append(y)
 
-        for i in range(batch_size):
-            output_i = outputs[i] if len(outputs.shape) > 1 else outputs
+                bounding_box = {
+                    "x": float(np.mean(xs)) if xs else 0.0,
+                    "y": float(np.mean(ys)) if ys else 0.0,
+                    "width": float(max(xs) - min(xs) + 0.05) if xs else 0.0,
+                    "height": float(max(ys) - min(ys) + 0.05) if ys else 0.0,
+                }
 
-            # Extract confidence from first output channel
-            confidence = float(torch.sigmoid(output_i[0]).item()) if output_i.shape[0] > 0 else 0.0
+                confidence = float(min(1.0, activity_score * 0.9 + min(1.0, energy / 20.0) * 0.1))
 
-            # Extract keypoints from model output if available
-            keypoints = self._extract_keypoints_from_output(output_i)
-
-            # Extract bounding box from model output if available
-            bounding_box = self._extract_bbox_from_output(output_i)
-
-            # Classify activity from features
-            activity = self._classify_activity(output_i)
-
-            pose = {
-                "person_id": i,
-                "confidence": confidence,
-                "keypoints": keypoints,
-                "bounding_box": bounding_box,
-                "activity": activity,
-                "timestamp": datetime.now().isoformat(),
-            }
-
-            poses.append(pose)
+                poses.append({
+                    "person_id": person_index + 1,
+                    "confidence": confidence,
+                    "keypoints": keypoints,
+                    "bounding_box": bounding_box,
+                    "activity": activity_label,
+                    "timestamp": datetime.now().isoformat(),
+                })
 
         return poses
+
+    def _activity_label(self, activity_index: int) -> str:
+        """Map activity class index to a simple label."""
+        activity_labels = [
+            "inactive",
+            "walking",
+            "standing",
+            "sitting",
+            "unknown"
+        ]
+        if 0 <= activity_index < len(activity_labels):
+            return activity_labels[activity_index]
+        return "unknown"
 
     def _extract_keypoints_from_output(self, output: torch.Tensor) -> List[Dict[str, Any]]:
         """Extract keypoints from a single person's model output.
@@ -509,20 +563,29 @@ class PoseService:
             NotImplementedError: If no CSI data is provided and mock mode is off.
         """
         try:
-            if csi_data is None and not self.settings.mock_pose_data:
-                raise NotImplementedError(
-                    "Pose estimation requires real CSI data input. No CSI data was provided "
-                    "and mock_pose_data is disabled. Either pass csi_data from hardware "
-                    "collection, or enable mock_pose_data for development. "
-                    "See docs/hardware-setup.md for CSI data collection setup."
-                )
-
             metadata = {
                 "timestamp": datetime.now(),
                 "zone_ids": zone_ids or ["zone_1"],
                 "confidence_threshold": confidence_threshold or self.settings.pose_confidence_threshold,
                 "max_persons": max_persons or self.settings.pose_max_persons,
             }
+
+            if csi_data is None and not self.settings.mock_pose_data:
+                if self.hardware_service is not None:
+                    recent_samples = await self.hardware_service.get_recent_data(limit=1)
+                    if recent_samples:
+                        latest_sample = recent_samples[-1]
+                        csi_data = latest_sample.get("data")
+                        metadata.update(latest_sample.get("metadata", {}))
+                        self.logger.debug("Using latest hardware CSI sample for pose estimation")
+
+                if csi_data is None:
+                    raise NotImplementedError(
+                        "Pose estimation requires real CSI data input. No CSI data was provided "
+                        "and mock_pose_data is disabled. Either pass csi_data from hardware "
+                        "collection, or enable mock_pose_data for development. "
+                        "See docs/hardware-setup.md for CSI data collection setup."
+                    )
 
             if csi_data is not None:
                 # Process real CSI data

@@ -27,10 +27,12 @@ def get_pose_service() -> PoseService:
     """Get pose service instance."""
     settings = get_settings()
     domain_config = get_domain_config()
-    
+    hardware_service = get_hardware_service()
+
     return PoseService(
         settings=settings,
-        domain_config=domain_config
+        domain_config=domain_config,
+        hardware_service=hardware_service,
     )
 
 
